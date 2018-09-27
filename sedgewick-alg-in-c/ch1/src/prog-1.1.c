@@ -4,6 +4,15 @@
 #include <stdio.h>
 #define N 10000
 
+/*
+ ***********************************************************
+ * Program 1.1 Quick-find solution to connectivity problem *
+ *                                                         *
+ * Source:  Algorithms in C, 3rd Ed., Robert Sedgewick     *
+ *          Chapter 1, Section 1.3, Program 1.1. (Page 12) *
+ ***********************************************************
+ */
+
 main() {
 
     int i, p, q, t, id[N];
