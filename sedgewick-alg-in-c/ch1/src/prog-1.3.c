@@ -2,6 +2,8 @@
 /* vim: set ts=8 sts=4 sw=4 et filetype=c: */
 
 #include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
 #define N 10000
 
 /*
@@ -13,9 +15,20 @@
  ***************************************************************
  */
 
-main() {
-
+int main(int argc, char *argv[]) {
     int i, j, p, q, t, id[N], sz[N];
+    bool dumpstate = false;
+
+    // Check args
+    for (int ai = 1; ai < argc; ai++) {
+        if (!strcmp(argv[ai], "-ds") ||
+            !strcmp(argv[ai], "--dumpstate"))
+            dumpstate = true;
+        else {
+            fprintf(stderr, "Unexpected argument: %s. Exiting.\n", argv[ai]);
+            return 3;
+        }
+    }
 
     for (i = 0; i < N; i++) {
         id[i] = i;
