@@ -16,7 +16,7 @@
  */
 
 int main(int argc, char *argv[]) {
-    int i, j, p, q, t, id[N], sz[N];
+    int i, j, p, q, t, id[N], sz[N], largest_seen = -1;
     bool dumpstate = false;
 
     // Check args
@@ -36,6 +36,10 @@ int main(int argc, char *argv[]) {
     } // for (i...)
 
     while (scanf("%d %d\n", &p, &q) == 2) {
+        // Record largest seen
+        if (largest_seen < p) largest_seen = p;
+        if (largest_seen < q) largest_seen = q;
+
         // Follow links until we find the set representative, i for p, and j for q
         for (i = p; i != id[i]; i = id[i]) ;
         for (j = q; j != id[j]; j = id[j]) ;
@@ -65,5 +69,10 @@ int main(int argc, char *argv[]) {
         printf(" %d %d\n", p, q);
 
     } // while (scanf(...))
+
+    if (dumpstate) {
+        for (i = 0; i < largest_seen; i++)
+            fprintf(stderr, " %d -> (id %d, sz %d)%s\n", i, id[i], sz[i], ((id[i] == i) ? " **" : ""));
+    } // if dumpstate
 
 } // main()
