@@ -16,7 +16,7 @@
 
 main() {
 
-    int i, p, q, t, id[N];
+    int i, j, p, q, t, id[N];
 
     for (i = 0; i < N; i++)
         id[i] = i;
