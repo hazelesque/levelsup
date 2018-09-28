@@ -18,12 +18,16 @@
 int main(int argc, char *argv[]) {
     int i, j, p, q, t, id[N], sz[N], largest_seen = -1;
     bool dumpstate = false;
+    bool dumppaths = false;
 
     // Check args
     for (int ai = 1; ai < argc; ai++) {
         if (!strcmp(argv[ai], "-ds") ||
             !strcmp(argv[ai], "--dumpstate"))
             dumpstate = true;
+        else if (!strcmp(argv[ai], "-dp") ||
+            !strcmp(argv[ai], "--dumppaths"))
+            dumppaths = true;
         else {
             fprintf(stderr, "Unexpected argument: %s. Exiting.\n", argv[ai]);
             return 3;
@@ -74,5 +78,20 @@ int main(int argc, char *argv[]) {
         for (i = 0; i < largest_seen; i++)
             fprintf(stderr, " %d -> (id %d, sz %d)%s\n", i, id[i], sz[i], ((id[i] == i) ? " **" : ""));
     } // if dumpstate
+
+    if (dumppaths) {
+        fprintf(stderr, " -- Dumping paths...\n");
+
+        for (i = 0; i < largest_seen; i++) {
+            fprintf(stderr, "%d", i);
+
+            for (j = i; id[j] != j; ) {
+                j = id[j];
+                fprintf(stderr, " -> %d", j);
+            }
+
+            fprintf(stderr, "\n");
+        }
+    } // if dumppaths
 
 } // main()
