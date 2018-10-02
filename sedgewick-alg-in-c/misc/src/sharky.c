@@ -87,11 +87,11 @@ int main(int argc, char *argv[]) {
                 name_temp[editcols[edit]] = c[edit];
 
                 // More columns to do this round?
-                if (edit < ed) {
+                if (edit < (ed - 1)) {
                     // Yes, do next...
                     edit++;
                     continue;
-                } else if (edit == ed) {
+                } else if (edit == (ed - 1)) {
                     // No, print candidate
                     printf("%s\n", name_temp);
 
