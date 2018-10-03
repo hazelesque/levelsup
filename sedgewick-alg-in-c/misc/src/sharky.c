@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+//#include <unistd.h>
+//#include <sys/types.h>
 
 #define MAX_NAME_LEN 50
 #define MAX_ED_LIMIT 10
@@ -17,30 +19,18 @@
 
 // Usage: $0 [max edit distance] [name] [dictionary file]
 
-int main(int argc, char *argv[]) {
-    int max_ed;
-    char *name;
+void hamming(int max_ed, char *name) {
     int name_len;
     char name_temp[MAX_NAME_LEN];
     int editcols[MAX_ED_LIMIT];
+    int ed, i, j, edit;
+    char c[MAX_ED_LIMIT];
 
-    // Check args
-
-    if (argc != 4) {
-        fprintf(stderr, "Unexpected number of arguments: %d. Exiting.\n", argc - 1);
-        return 3;
-    }
-
-    sscanf(argv[1], "%d", &max_ed);
-    name = argv[2];
     name_len = strlen(name);
 
     fprintf(stderr, "Max edit distance: %d, Name: \"%s\" (Length: %d)\n", max_ed, name, name_len);
 
-    int ed, i, j, edit;
-    char c[MAX_ED_LIMIT];
-
-    // Edit distance
+    // Hamming distance
     for (ed = 1; ed <= max_ed; ed++) {
         // Initialise state for editcols
         i = -1;
@@ -119,5 +109,22 @@ int main(int argc, char *argv[]) {
         }
 
     } // for ed
+}
+
+int main(int argc, char *argv[]) {
+    int max_ed;
+    char *name;
+
+    // Check args
+
+    if (argc != 4) {
+        fprintf(stderr, "Unexpected number of arguments: %d. Exiting.\n", argc - 1);
+        return 3;
+    }
+
+    sscanf(argv[1], "%d", &max_ed);
+    name = argv[2];
+
+    hamming(max_ed, name);
 
 } // main()
