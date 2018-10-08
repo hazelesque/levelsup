@@ -1,7 +1,9 @@
 
 /* vim: set ts=8 sts=4 sw=4 et filetype=c: */
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -24,20 +26,19 @@
 
 void hamming(int max_ed, char *name, int fd) {
     char       *buf;
+    char       *buf_writeptr;
+    char       *buf_readptr;
     size_t      buf_len;
+    size_t      buf_len_remaining;
+    size_t      buf_len_remaining_read;
     size_t      page_size;
+    bool        buf_dirty = false;
+
     int         name_len;
     char        name_temp[MAX_NAME_LEN];
     int         editcols[MAX_ED_LIMIT];
     int         ed, i, j, edit;
     char        c[MAX_ED_LIMIT];
-    FILE       *f;
-
-    // Convert fd to FILE* with fdopen
-    if ((f = fdopen(fd, "w")) == NULL) {
-        perror("[hamming] fdopen");
-        exit(4);
-    }
 
     name_len = strlen(name);
 
@@ -47,6 +48,10 @@ void hamming(int max_ed, char *name, int fd) {
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
     int pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+    buf_writeptr = buf;
+    buf_readptr = buf;
+    buf_len_remaining = buf_len;
+    buf_len_remaining_read = buf_len;
 
     // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
     // so we mustn't use perror().
@@ -107,8 +112,65 @@ void hamming(int max_ed, char *name, int fd) {
                     edit++;
                     continue;
                 } else if (edit == (ed - 1)) {
-                    // No, print candidate
-                    fprintf(f, "%s\n", name_temp);
+                    // No, emit candidate
+                    for ( ; ; ) {
+                        // Append candidate word + newline to buffer
+                        int snp_rv = snprintf(buf_writeptr, buf_len_remaining, "%s\n", name_temp);
+                        buf_dirty = true;
+
+                        // Check for error
+                        if (snp_rv < 0) {
+                            perror("[hamming] snprintf");
+                            exit(4);
+                        }
+
+                        // Check for truncation
+                        if ((size_t)(snp_rv * sizeof(char)) >= buf_len_remaining) {
+                            // Fill remainder of buffer with null bytes
+                            memset(buf_writeptr, 0, buf_len_remaining);
+
+                            // Write page to pipe
+                            for (int n = 0; buf_len_remaining_read > 0; ) {
+                                ssize_t wr_rv = write(fd, buf_readptr, buf_len_remaining_read);
+
+                                if (wr_rv < 0) {
+                                    switch (errno) {
+                                        case EINTR:
+                                        case EAGAIN:
+                                            // Try again
+                                            continue;
+                                        default:
+                                            perror("[hamming] write");
+                                            exit(4);
+                                    }
+                                } else {
+                                    buf_readptr += (wr_rv / sizeof(char));
+                                    buf_len_remaining_read -= ((wr_rv / sizeof(char)) * sizeof(char));
+                                }
+                            }
+
+                            // Start again at beginning of page
+                            buf_writeptr = buf;
+                            buf_readptr = buf;
+                            buf_len_remaining = buf_len;
+                            buf_len_remaining_read = buf_len;
+                            buf_dirty = false;
+
+                            // Zero buffer
+                            memset(buf_writeptr, 0, buf_len_remaining);
+
+                            // Retry writing candidate word
+                            continue;
+
+                        } else {
+                            // Deliberately update pointer to point at location of '\0'
+                            buf_len_remaining -= (size_t)(snp_rv * sizeof(char));
+                            buf_writeptr += snp_rv;
+
+                            // Candidate word was written OK, no need to retry, break out of loop
+                            break;
+                        }
+                    }
 
                     // Select next set of chars
                     for (j = (ed - 1); j >= 0; ) {
@@ -135,11 +197,30 @@ void hamming(int max_ed, char *name, int fd) {
 
     } // for ed
 
+    // Write partially-full page to pipe before freeing it
+    if (buf_dirty) {
+        for (int n = 0; buf_len_remaining_read > 0; ) {
+            ssize_t wr_rv = write(fd, buf_readptr, buf_len_remaining_read);
+
+            if (wr_rv < 0) {
+                switch (errno) {
+                    case EINTR:
+                    case EAGAIN:
+                        // Try again
+                        continue;
+                    default:
+                        perror("[hamming] write");
+                        exit(4);
+                }
+            } else {
+                buf_readptr += (wr_rv / sizeof(char));
+                buf_len_remaining_read -= ((wr_rv / sizeof(char)) * sizeof(char));
+            }
+        }
+    }
+
     // Clean up
     if (buf) free(buf);
-
-    // Close FILE for pipe fd
-    fclose(f);
 
 }
 
