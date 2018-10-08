@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
@@ -35,7 +36,7 @@ void hamming(int max_ed, char *name, int fd) {
     size_t      buf_len_remaining_read;
     size_t      page_size;
     bool        buf_dirty = false;
-    int         pma_rv;
+    void       *mm_rv;
 
     int         name_len;
     char        name_temp[MAX_NAME_LEN];
@@ -50,18 +51,20 @@ void hamming(int max_ed, char *name, int fd) {
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
-    pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+
+    mm_rv = mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (mm_rv == MAP_FAILED) {
+        perror("[hamming] mmap");
+        exit(4);
+    }
+
+    buf = (char*)mm_rv;
+
     buf_writeptr = buf;
     buf_readptr = buf;
     buf_len_remaining = buf_len;
     buf_len_remaining_read = buf_len;
-
-    // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
-    // so we mustn't use perror().
-    if (pma_rv) {
-        fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
-        abort();
-    }
 
     // Zero buffer
     memset(buf_writeptr, 0, buf_len_remaining);
@@ -170,23 +173,24 @@ void hamming(int max_ed, char *name, int fd) {
                                 }
                             }
 
-                            // Free old buffer that we gave away
-                            free(buf);
+                            // Unmap old buffer that we gave away
+                            munmap(buf, buf_len);
 
                             // New buffer
-                            pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+                            mm_rv = mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+                            if (mm_rv == MAP_FAILED) {
+                                perror("[hamming] mmap");
+                                exit(4);
+                            }
+
+                            buf = (char*)mm_rv;
+
                             buf_writeptr = buf;
                             buf_readptr = buf;
                             buf_len_remaining = buf_len;
                             buf_len_remaining_read = buf_len;
                             buf_dirty = false;
-
-                            // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
-                            // so we mustn't use perror().
-                            if (pma_rv) {
-                                fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
-                                abort();
-                            }
 
                             // Zero buffer
                             memset(buf_writeptr, 0, buf_len_remaining);
@@ -261,7 +265,7 @@ void hamming(int max_ed, char *name, int fd) {
     }
 
     // Clean up
-    if (buf) free(buf);
+    munmap(buf, buf_len);
 
 }
 
