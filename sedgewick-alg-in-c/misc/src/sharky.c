@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -273,6 +274,7 @@ void catlines(int fd) {
     size_t      buf_len_remaining_read;
     size_t      page_size;
     size_t      chars_read;
+    bool        reached_eof = false;
 
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
@@ -286,7 +288,7 @@ void catlines(int fd) {
     // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
     // so we mustn't use perror().
     if (pma_rv) {
-        fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
+        fprintf(stderr, "[catlines] posix_memalign failed, returned %d.\n", pma_rv);
         abort();
     }
 
@@ -294,25 +296,52 @@ void catlines(int fd) {
     memset(buf_writeptr, 0, buf_len_remaining);
 
     for ( ; ; ) {
-        ssize_t rd_rv = read(fd, buf_writeptr, buf_len_remaining);
+        // Get page from pipe using vmsplice
+        //
+        // Hilariously undocumented, have to read the kernel source
+        // to even know this is possible(!)
+        struct iovec iov = {
+            .iov_base   = buf_writeptr,
+            .iov_len    = buf_len_remaining,
+        };
 
-        if (rd_rv < 0) {
-            switch (errno) {
-                case EINTR:
-                case EAGAIN:
-                    // Try again
-                    continue;
-                default:
-                    perror("[catlines] read");
-                    exit(4);
+        struct pollfd pfd = {
+            .fd         = fd,
+            .events     = POLLIN,
+        };
+
+        while (buf_len_remaining) {
+            if (poll(&pfd, 1, -1) < 0) {
+                switch (errno) {
+                    case EINTR:
+                        // Try again
+                        continue;
+                    default:
+                        perror("[catlines] poll");
+                        exit(4);
+                }
             }
-        } else {
-            buf_writeptr += (rd_rv / sizeof(char));
-            buf_len_remaining -= ((rd_rv / sizeof(char))  * sizeof(char));
-        }
 
-        // If there's free buffer left, and we've not reached EOF, keep reading
-        if(buf_len_remaining && (rd_rv != 0)) continue;
+            ssize_t vms_rv = vmsplice(fd, &iov, 1, 0);
+
+            if (vms_rv < 0) {
+                switch (errno) {
+                    case EAGAIN:
+                        // Try again
+                        continue;
+                    default:
+                        perror("[catlines] vmsplice");
+                        exit(4);
+                }
+            } else {
+                buf_writeptr += (vms_rv / sizeof(char));
+                buf_len_remaining -= ((vms_rv / sizeof(char))  * sizeof(char));
+                iov.iov_base += ((vms_rv / sizeof(char)) * sizeof(char));
+                iov.iov_len -= ((vms_rv / sizeof(char)) * sizeof(char));
+            }
+
+            if (!vms_rv) reached_eof = true;
+        }
 
         // Adjust buf_len_remaining_read so that we don't write nulls to the terminal
         for ( ; buf_len_remaining_read >= sizeof(char); ) {
@@ -344,7 +373,7 @@ void catlines(int fd) {
         }
 
         // Did we reach EOF?
-        if (rd_rv == 0) break;
+        if (reached_eof) break;
 
         // Clear and go around
         buf_writeptr = buf;
