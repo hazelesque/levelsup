@@ -23,12 +23,15 @@
 // Usage: $0 [max edit distance] [name] [dictionary file]
 
 void hamming(int max_ed, char *name, int fd) {
-    int     name_len;
-    char    name_temp[MAX_NAME_LEN];
-    int     editcols[MAX_ED_LIMIT];
-    int     ed, i, j, edit;
-    char    c[MAX_ED_LIMIT];
-    FILE    *f;
+    char       *buf;
+    size_t      buf_len;
+    size_t      page_size;
+    int         name_len;
+    char        name_temp[MAX_NAME_LEN];
+    int         editcols[MAX_ED_LIMIT];
+    int         ed, i, j, edit;
+    char        c[MAX_ED_LIMIT];
+    FILE       *f;
 
     // Convert fd to FILE* with fdopen
     if ((f = fdopen(fd, "w")) == NULL) {
@@ -39,6 +42,18 @@ void hamming(int max_ed, char *name, int fd) {
     name_len = strlen(name);
 
     fprintf(stderr, "Max edit distance: %d, Name: \"%s\" (Length: %d)\n", max_ed, name, name_len);
+
+    // Allocate a buffer, page-aligned, one page in size
+    page_size = (size_t)sysconf(_SC_PAGESIZE);
+    buf_len = page_size;
+    int pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+
+    // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
+    // so we mustn't use perror().
+    if (pma_rv) {
+        fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
+        abort();
+    }
 
     // Hamming distance
     for (ed = 1; ed <= max_ed; ed++) {
@@ -119,6 +134,9 @@ void hamming(int max_ed, char *name, int fd) {
         }
 
     } // for ed
+
+    // Clean up
+    if (buf) free(buf);
 
     // Close FILE for pipe fd
     fclose(f);
