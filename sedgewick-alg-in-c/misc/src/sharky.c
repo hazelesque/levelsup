@@ -340,7 +340,10 @@ void catlines(int fd) {
                 iov.iov_len -= ((vms_rv / sizeof(char)) * sizeof(char));
             }
 
-            if (!vms_rv) reached_eof = true;
+            if (!vms_rv) {
+                reached_eof = true;
+                break;
+            }
         }
 
         // Adjust buf_len_remaining_read so that we don't write nulls to the terminal
