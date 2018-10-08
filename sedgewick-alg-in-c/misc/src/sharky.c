@@ -60,6 +60,9 @@ void hamming(int max_ed, char *name, int fd) {
         abort();
     }
 
+    // Zero buffer
+    memset(buf_writeptr, 0, buf_len_remaining);
+
     // Hamming distance
     for (ed = 1; ed <= max_ed; ed++) {
         // Initialise state for editcols
@@ -124,7 +127,17 @@ void hamming(int max_ed, char *name, int fd) {
                             exit(4);
                         }
 
-                        // Check for truncation
+                        // If truncation has occurred, i.e. only part of the candidate word
+                        // was able to be written to the buffer, then:
+                        //
+                        // 1. Zero out the partial write in the buffer
+                        // 2. Write the buffer out to fd, retrying until the entire buffer
+                        //    has been written out
+                        // 3. Clear (zero) the buffer
+                        // 4. Reset pointers and counters
+                        // 5. Go around the loop again in order to retry appending the
+                        //    candidate word to the buffer
+
                         if ((size_t)(snp_rv * sizeof(char)) >= buf_len_remaining) {
                             // Fill remainder of buffer with null bytes
                             memset(buf_writeptr, 0, buf_len_remaining);
@@ -199,6 +212,9 @@ void hamming(int max_ed, char *name, int fd) {
 
     // Write partially-full page to pipe before freeing it
     if (buf_dirty) {
+        // Fill remainder of buffer with null bytes
+        memset(buf_writeptr, 0, buf_len_remaining);
+
         for (int n = 0; buf_len_remaining_read > 0; ) {
             ssize_t wr_rv = write(fd, buf_readptr, buf_len_remaining_read);
 
@@ -226,33 +242,97 @@ void hamming(int max_ed, char *name, int fd) {
 
 void catlines(int fd) {
     char       *buf;
-    size_t      buf_len = ((sizeof(char)) * (MAX_NAME_LEN+1));
+    char       *buf_writeptr;
+    char       *buf_readptr;
+    size_t      buf_len;
+    size_t      buf_len_remaining;
+    size_t      buf_len_remaining_read;
+    size_t      page_size;
     size_t      chars_read;
-    FILE       *f;
 
-    // Convert fd to FILE* with fdopen
-    if ((f = fdopen(fd, "r")) == NULL) {
-        perror("[catlines] fdopen");
-        exit(4);
+    // Allocate a buffer, page-aligned, one page in size
+    page_size = (size_t)sysconf(_SC_PAGESIZE);
+    buf_len = page_size;
+    int pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+    buf_writeptr = buf;
+    buf_readptr = buf;
+    buf_len_remaining = buf_len;
+    buf_len_remaining_read = buf_len;
+
+    // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
+    // so we mustn't use perror().
+    if (pma_rv) {
+        fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
+        abort();
     }
 
-    // Allocate buffer
-    if ((buf = (char *) malloc(buf_len)) == NULL) {
-        perror("malloc");
-        exit(4);
-    }
+    // Zero buffer
+    memset(buf_writeptr, 0, buf_len_remaining);
 
-    // Read lines and re-emit them to stdout
-    //
-    // getline(...) will realloc as necessary if buffer is too small
-    // and hence needs a pointer to our char array pointer so it can
-    // update our pointer for us, and likewise for buf_len.
-    while ((chars_read = getline(&buf, &buf_len, f)) != -1) {
-        fprintf(stdout, "%s", buf);
+    for ( ; ; ) {
+        ssize_t rd_rv = read(fd, buf_writeptr, buf_len_remaining);
+
+        if (rd_rv < 0) {
+            switch (errno) {
+                case EINTR:
+                case EAGAIN:
+                    // Try again
+                    continue;
+                default:
+                    perror("[catlines] read");
+                    exit(4);
+            }
+        } else {
+            buf_writeptr += (rd_rv / sizeof(char));
+            buf_len_remaining -= ((rd_rv / sizeof(char))  * sizeof(char));
+        }
+
+        // If there's free buffer left, and we've not reached EOF, keep reading
+        if(buf_len_remaining && (rd_rv != 0)) continue;
+
+        // Adjust buf_len_remaining_read so that we don't write nulls to the terminal
+        for ( ; buf_len_remaining_read >= sizeof(char); ) {
+            if (buf_readptr[(buf_len_remaining_read/sizeof(char))-1] == '\0') {
+                buf_len_remaining_read -= sizeof(char);
+            } else {
+                break;
+            }
+        }
+
+        // Start writing to stdout
+        for (; buf_len_remaining_read > 0; ) {
+            ssize_t wr_rv = write(fileno(stdout), buf_readptr, buf_len_remaining_read);
+
+            if (wr_rv < 0) {
+                switch (errno) {
+                    case EINTR:
+                    case EAGAIN:
+                        // Try again
+                        continue;
+                    default:
+                        perror("[catlines] write");
+                        exit(4);
+                }
+            } else {
+                buf_readptr += (wr_rv / sizeof(char));
+                buf_len_remaining_read -= ((wr_rv / sizeof(char)) * sizeof(char));
+            }
+        }
+
+        // Did we reach EOF?
+        if (rd_rv == 0) break;
+
+        // Clear and go around
+        buf_writeptr = buf;
+        buf_readptr = buf;
+        buf_len_remaining = buf_len;
+        buf_len_remaining_read = buf_len;
+
+        // Zero buffer
+        memset(buf_writeptr, 0, buf_len_remaining);
     }
 
     // Clean up
-    fclose(f);
     if (buf) free(buf);
 }
 
