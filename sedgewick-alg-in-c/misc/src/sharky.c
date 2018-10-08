@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/uio.h>
 
 #define MAX_NAME_LEN 50
 #define MAX_ED_LIMIT 10
@@ -33,6 +34,7 @@ void hamming(int max_ed, char *name, int fd) {
     size_t      buf_len_remaining_read;
     size_t      page_size;
     bool        buf_dirty = false;
+    int         pma_rv;
 
     int         name_len;
     char        name_temp[MAX_NAME_LEN];
@@ -47,7 +49,7 @@ void hamming(int max_ed, char *name, int fd) {
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
-    int pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
+    pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
     buf_writeptr = buf;
     buf_readptr = buf;
     buf_len_remaining = buf_len;
@@ -142,32 +144,48 @@ void hamming(int max_ed, char *name, int fd) {
                             // Fill remainder of buffer with null bytes
                             memset(buf_writeptr, 0, buf_len_remaining);
 
-                            // Write page to pipe
-                            for (int n = 0; buf_len_remaining_read > 0; ) {
-                                ssize_t wr_rv = write(fd, buf_readptr, buf_len_remaining_read);
+                            // Give away page(s) to pipe using vmsplice
+                            struct iovec iov = {
+                                .iov_base   = buf_readptr,
+                                .iov_len    = buf_len_remaining_read,
+                            };
 
-                                if (wr_rv < 0) {
+                            while (buf_len_remaining_read) {
+                                ssize_t vms_rv = vmsplice(fd, &iov, 1, SPLICE_F_GIFT);
+
+                                if (vms_rv < 0) {
                                     switch (errno) {
-                                        case EINTR:
                                         case EAGAIN:
                                             // Try again
                                             continue;
                                         default:
-                                            perror("[hamming] write");
+                                            perror("[hamming] vmsplice");
                                             exit(4);
                                     }
                                 } else {
-                                    buf_readptr += (wr_rv / sizeof(char));
-                                    buf_len_remaining_read -= ((wr_rv / sizeof(char)) * sizeof(char));
+                                    buf_len_remaining_read -= vms_rv;
+                                    iov.iov_base += vms_rv;
+                                    iov.iov_len -= vms_rv;
                                 }
                             }
 
-                            // Start again at beginning of page
+                            // Free old buffer that we gave away
+                            free(buf);
+
+                            // New buffer
+                            pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
                             buf_writeptr = buf;
                             buf_readptr = buf;
                             buf_len_remaining = buf_len;
                             buf_len_remaining_read = buf_len;
                             buf_dirty = false;
+
+                            // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
+                            // so we mustn't use perror().
+                            if (pma_rv) {
+                                fprintf(stderr, "[hamming] posix_memalign failed, returned %d.\n", pma_rv);
+                                abort();
+                            }
 
                             // Zero buffer
                             memset(buf_writeptr, 0, buf_len_remaining);
@@ -215,22 +233,28 @@ void hamming(int max_ed, char *name, int fd) {
         // Fill remainder of buffer with null bytes
         memset(buf_writeptr, 0, buf_len_remaining);
 
-        for (int n = 0; buf_len_remaining_read > 0; ) {
-            ssize_t wr_rv = write(fd, buf_readptr, buf_len_remaining_read);
+        // Give away page(s) to pipe using vmsplice
+        struct iovec iov = {
+            .iov_base   = buf_readptr,
+            .iov_len    = buf_len_remaining_read,
+        };
 
-            if (wr_rv < 0) {
+        while (buf_len_remaining_read) {
+            ssize_t vms_rv = vmsplice(fd, &iov, 1, SPLICE_F_GIFT);
+
+            if (vms_rv < 0) {
                 switch (errno) {
-                    case EINTR:
                     case EAGAIN:
                         // Try again
                         continue;
                     default:
-                        perror("[hamming] write");
+                        perror("[hamming] vmsplice");
                         exit(4);
                 }
             } else {
-                buf_readptr += (wr_rv / sizeof(char));
-                buf_len_remaining_read -= ((wr_rv / sizeof(char)) * sizeof(char));
+                buf_len_remaining_read -= vms_rv;
+                iov.iov_base += vms_rv;
+                iov.iov_len -= vms_rv;
             }
         }
     }
