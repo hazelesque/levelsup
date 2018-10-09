@@ -49,7 +49,7 @@ void sb_create_mmap(struct sharkybuf *sb, size_t len) {
     /*
      * Create a buffer, allocated by mmap(...) with MAP_ANONYMOUS flag
      *
-     * Assets:
+     * Asserts:
      *      sb is not null
      *      len is an exact multiple of system page size
      */
