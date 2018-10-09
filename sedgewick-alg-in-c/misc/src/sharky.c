@@ -1,6 +1,7 @@
 
 /* vim: set ts=8 sts=4 sw=4 et filetype=c: */
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -27,22 +28,100 @@
 
 // Usage: $0 [max edit distance] [name] [dictionary file]
 
-void hamming(int max_ed, char *name, int fd) {
-    char       *buf;
-    char       *buf_writeptr;
-    char       *buf_readptr;
-    size_t      buf_len;
-    size_t      buf_len_remaining;
-    size_t      buf_len_remaining_read;
-    size_t      page_size;
-    bool        buf_dirty = false;
+
+#define SHARKYBUF_STRATEGY_UNALLOCATED      0
+#define SHARKYBUF_STRATEGY_MMAP             1
+#define SHARKYBUF_STRATEGY_POSIX_MEMALIGN   2
+
+struct sharkybuf {
+    int         strategy;
+    void       *addr;
+    size_t      len;
+    bool        dirty;
+};
+
+void sb_create_mmap(struct sharkybuf *sb, size_t len) {
+    /*
+     * Create a buffer, allocated by mmap(...) with MAP_ANONYMOUS flag
+     *
+     * Assets:
+     *      sb is not null
+     *      len is an exact multiple of system page size
+     */
     void       *mm_rv;
 
-    int         name_len;
-    char        name_temp[MAX_NAME_LEN];
-    int         editcols[MAX_ED_LIMIT];
-    int         ed, i, j, edit;
-    char        c[MAX_ED_LIMIT];
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert((len % (size_t)sysconf(_SC_PAGESIZE)) == 0);
+
+    // Perform mmap
+    mm_rv = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (mm_rv == MAP_FAILED) {
+        perror("[sb_create_mmap] mmap");
+        exit(4);
+    }
+
+    // Zero buffer
+    memset(mm_rv, 0, len);
+
+    // Populate struct
+    sb->strategy = SHARKYBUF_STRATEGY_MMAP;
+    sb->addr = mm_rv;
+    sb->len = len;
+    sb->dirty = false;
+}
+
+void sb_dispose_mmap_(struct sharkybuf *sb) {
+    /*
+     * Dispose of buffer we allocated previously
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->strategy is SHARKYBUF_STRATEGY_MMAP
+     */
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->strategy == SHARKYBUF_STRATEGY_MMAP);
+
+    // Actually unmap the memory-mapped page(s)
+    munmap(sb->addr, sb->len);
+
+    // Clear struct
+    sb->strategy = SHARKYBUF_STRATEGY_UNALLOCATED;
+    sb->addr = NULL;
+    sb->len = 0;
+    sb->dirty = false;
+}
+
+void sb_dispose(struct sharkybuf *sb) {
+    switch (sb->strategy) {
+        case SHARKYBUF_STRATEGY_MMAP:
+            sb_dispose_mmap_(sb);
+            break;
+        default:
+            fprintf(stderr, "[sb_dispose] invalid strategy %d.\n", sb->strategy);
+            abort();
+    }
+}
+
+void hamming(int max_ed, char *name, int fd) {
+    struct sharkybuf    sbuf;
+    char               *buf;
+    char               *buf_writeptr;
+    char               *buf_readptr;
+    size_t              buf_len;
+    size_t              buf_len_remaining;
+    size_t              buf_len_remaining_read;
+    size_t              page_size;
+    void               *mm_rv;
+
+    int                 name_len;
+    char                name_temp[MAX_NAME_LEN];
+    int                 editcols[MAX_ED_LIMIT];
+    int                 ed, i, j, edit;
+    char                c[MAX_ED_LIMIT];
 
     name_len = strlen(name);
 
@@ -52,22 +131,14 @@ void hamming(int max_ed, char *name, int fd) {
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
 
-    mm_rv = mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    sb_create_mmap(&sbuf, buf_len);
 
-    if (mm_rv == MAP_FAILED) {
-        perror("[hamming] mmap");
-        exit(4);
-    }
-
-    buf = (char*)mm_rv;
+    buf = (char*)sbuf.addr;
 
     buf_writeptr = buf;
     buf_readptr = buf;
     buf_len_remaining = buf_len;
     buf_len_remaining_read = buf_len;
-
-    // Zero buffer
-    memset(buf_writeptr, 0, buf_len_remaining);
 
     // Hamming distance
     for (ed = 1; ed <= max_ed; ed++) {
@@ -125,7 +196,7 @@ void hamming(int max_ed, char *name, int fd) {
                     for ( ; ; ) {
                         // Append candidate word + newline to buffer
                         int snp_rv = snprintf(buf_writeptr, buf_len_remaining, "%s\n", name_temp);
-                        buf_dirty = true;
+                        sbuf.dirty = true;
 
                         // Check for error
                         if (snp_rv < 0) {
@@ -174,26 +245,17 @@ void hamming(int max_ed, char *name, int fd) {
                             }
 
                             // Unmap old buffer that we gave away
-                            munmap(buf, buf_len);
+                            sb_dispose(&sbuf);
 
                             // New buffer
-                            mm_rv = mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                            sb_create_mmap(&sbuf, buf_len);
 
-                            if (mm_rv == MAP_FAILED) {
-                                perror("[hamming] mmap");
-                                exit(4);
-                            }
-
-                            buf = (char*)mm_rv;
+                            buf = (char*)sbuf.addr;
 
                             buf_writeptr = buf;
                             buf_readptr = buf;
                             buf_len_remaining = buf_len;
                             buf_len_remaining_read = buf_len;
-                            buf_dirty = false;
-
-                            // Zero buffer
-                            memset(buf_writeptr, 0, buf_len_remaining);
 
                             // Retry writing candidate word
                             continue;
@@ -234,7 +296,7 @@ void hamming(int max_ed, char *name, int fd) {
     } // for ed
 
     // Write partially-full page to pipe before freeing it
-    if (buf_dirty) {
+    if (sbuf.dirty) {
         // Fill remainder of buffer with null bytes
         memset(buf_writeptr, 0, buf_len_remaining);
 
@@ -265,7 +327,7 @@ void hamming(int max_ed, char *name, int fd) {
     }
 
     // Clean up
-    munmap(buf, buf_len);
+    sb_dispose(&sbuf);
 
 }
 
