@@ -362,6 +362,16 @@ void sb_sendbuf_vmsplice(struct sharkybuf *sb, int fd) {
 }
 
 void hamming(int max_ed, char *name, int fd) {
+    /*
+     * Generate all possible permutations of the string name where up to
+     * max_ed columns have been overwritten with a character from a-z,
+     * and then write them to pipe fd in buffer-sized chunks, separated
+     * by newlines.
+     *
+     * Asserts:
+     *      strlen(name) <= (MAX_NAME_LEN - 1)
+     *      max_ed <= MAX_ED_LIMIT
+     */
     struct sharkybuf    sbuf;
     size_t              buf_len;
     size_t              page_size;
@@ -371,6 +381,10 @@ void hamming(int max_ed, char *name, int fd) {
     int                 editcols[MAX_ED_LIMIT];
     int                 ed, i, j, edit;
     char                c[MAX_ED_LIMIT];
+
+    // Pre-flight checks
+    assert(strlen(name) <= (MAX_NAME_LEN - 1));
+    assert(max_ed <= MAX_ED_LIMIT);
 
     name_len = strlen(name);
 
@@ -502,6 +516,10 @@ void hamming(int max_ed, char *name, int fd) {
 }
 
 void catlines(int fd) {
+    /*
+     * Read buffer-sized chunks from pipe fd and write back out to standard
+     * output, truncating any null bytes from the end of the received buffer.
+     */
     struct sharkybuf    sbuf;
     char               *buf_readptr;
     size_t              buf_len;
