@@ -164,15 +164,62 @@ int sb_append_line_or_zeroes(struct sharkybuf *sb, char *line) {
 
 }
 
+void sb_sendbuf_vmsplice(struct sharkybuf *sb, int fd) {
+    /*
+     * Send content of buffer sb to pipe fd, then dispose of buffer
+     * and replace with a new one.
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->addr is not NULL
+     *      sb->strategy is SHARKYBUF_STRATEGY_MMAP
+     */
+
+    size_t          len;
+    struct iovec    iov;
+    size_t          reader_len_remaining;
+    ssize_t         vms_rv;
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->addr != NULL);
+    assert(sb->strategy == SHARKYBUF_STRATEGY_MMAP);
+
+    // Setup
+    reader_len_remaining = sb->len;
+    iov.iov_base = sb->addr;
+    iov.iov_len = reader_len_remaining;
+
+    // Transfer
+    while (reader_len_remaining) {
+        vms_rv = vmsplice(fd, &iov, 1, SPLICE_F_GIFT);
+
+        if (vms_rv < 0) {
+            switch (errno) {
+                case EAGAIN:
+                    // Try again
+                    continue;
+                default:
+                    perror("[sb_sendbuf_vmsplice] vmsplice");
+                    exit(4);
+            }
+        } else {
+            reader_len_remaining -= vms_rv;
+            iov.iov_base += vms_rv;
+            iov.iov_len -= vms_rv;
+        }
+    }
+
+    // Dispose and replace
+    len = sb->len;
+    sb_dispose(sb);
+    sb_create_mmap(sb, len);
+}
+
 void hamming(int max_ed, char *name, int fd) {
     struct sharkybuf    sbuf;
-    char               *buf;
-    char               *buf_readptr;
     size_t              buf_len;
-    size_t              buf_len_remaining;
-    size_t              buf_len_remaining_read;
     size_t              page_size;
-    void               *mm_rv;
 
     int                 name_len;
     char                name_temp[MAX_NAME_LEN];
@@ -189,12 +236,6 @@ void hamming(int max_ed, char *name, int fd) {
     buf_len = page_size;
 
     sb_create_mmap(&sbuf, buf_len);
-
-    buf = (char*)sbuf.addr;
-
-    buf_readptr = buf;
-    buf_len_remaining = buf_len;
-    buf_len_remaining_read = buf_len;
 
     // Hamming distance
     for (ed = 1; ed <= max_ed; ed++) {
@@ -265,42 +306,9 @@ void hamming(int max_ed, char *name, int fd) {
                         //    candidate word to the buffer
 
                         if (append_rv != 0) {
-                            // Give away page(s) to pipe using vmsplice
-                            struct iovec iov = {
-                                .iov_base   = buf_readptr,
-                                .iov_len    = buf_len_remaining_read,
-                            };
-
-                            while (buf_len_remaining_read) {
-                                ssize_t vms_rv = vmsplice(fd, &iov, 1, SPLICE_F_GIFT);
-
-                                if (vms_rv < 0) {
-                                    switch (errno) {
-                                        case EAGAIN:
-                                            // Try again
-                                            continue;
-                                        default:
-                                            perror("[hamming] vmsplice");
-                                            exit(4);
-                                    }
-                                } else {
-                                    buf_len_remaining_read -= vms_rv;
-                                    iov.iov_base += vms_rv;
-                                    iov.iov_len -= vms_rv;
-                                }
-                            }
-
-                            // Unmap old buffer that we gave away
-                            sb_dispose(&sbuf);
-
-                            // New buffer
-                            sb_create_mmap(&sbuf, buf_len);
-
-                            buf = (char*)sbuf.addr;
-
-                            buf_readptr = buf;
-                            buf_len_remaining = buf_len;
-                            buf_len_remaining_read = buf_len;
+                            // Give away page(s) to pipe using vmsplice, and receive details of
+                            // new page into struct at &sbuf.
+                            sb_sendbuf_vmsplice(&sbuf, fd);
 
                             // Retry writing candidate word
                             continue;
@@ -338,30 +346,9 @@ void hamming(int max_ed, char *name, int fd) {
 
     // Write partially-full page to pipe before freeing it
     if (sbuf.dirty) {
-        // Give away page(s) to pipe using vmsplice
-        struct iovec iov = {
-            .iov_base   = buf_readptr,
-            .iov_len    = buf_len_remaining_read,
-        };
-
-        while (buf_len_remaining_read) {
-            ssize_t vms_rv = vmsplice(fd, &iov, 1, SPLICE_F_GIFT);
-
-            if (vms_rv < 0) {
-                switch (errno) {
-                    case EAGAIN:
-                        // Try again
-                        continue;
-                    default:
-                        perror("[hamming] vmsplice");
-                        exit(4);
-                }
-            } else {
-                buf_len_remaining_read -= vms_rv;
-                iov.iov_base += vms_rv;
-                iov.iov_len -= vms_rv;
-            }
-        }
+        // Give away page(s) to pipe using vmsplice, and receive details of
+        // new page into struct at &sbuf.
+        sb_sendbuf_vmsplice(&sbuf, fd);
     }
 
     // Clean up
