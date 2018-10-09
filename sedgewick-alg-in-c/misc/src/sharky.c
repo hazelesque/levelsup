@@ -297,6 +297,7 @@ int sb_recvbuf_read(struct sharkybuf *sb, int fd) {
                     exit(4);
             }
         } else {
+            sb->dirty = true;
             sb->writer_ptr += (rd_rv / sizeof(char));
             sb->writer_len_remaining -= ((rd_rv / sizeof(char))  * sizeof(char));
         }
