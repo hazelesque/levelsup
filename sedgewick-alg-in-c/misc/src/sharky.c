@@ -38,6 +38,10 @@ struct sharkybuf {
     int         strategy;
     void       *addr;
     size_t      len;
+
+    /* clean/dirty status is only guaranteed if buffer is only ever written
+     * to/cleared by sb_* functions
+     */
     bool        dirty;
 
     /* position of writer head */
@@ -81,9 +85,48 @@ void sb_create_mmap(struct sharkybuf *sb, size_t len) {
     sb->writer_len_remaining = len;
 }
 
+void sb_create_posix_memalign(struct sharkybuf *sb, size_t len) {
+    /*
+     * Create a pagesize-aligned buffer, allocated by posix_memalign(3).
+     *
+     * Asserts:
+     *      sb is not null
+     *      len is an exact multiple of system page size
+     */
+    void       *addr;
+    int         pma_rv;
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert((len % (size_t)sysconf(_SC_PAGESIZE)) == 0);
+
+    // Perform allocation
+    pma_rv = posix_memalign((void**)&addr, (size_t)sysconf(_SC_PAGESIZE), len);
+
+    // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
+    // so we mustn't use perror().
+    if (pma_rv) {
+        fprintf(stderr, "[sb_create_posix_memalign] posix_memalign failed, returned %d.\n", pma_rv);
+        exit(4);
+    }
+
+    // Zero buffer
+    memset(addr, 0, len);
+
+    // Populate struct
+    sb->strategy = SHARKYBUF_STRATEGY_POSIX_MEMALIGN;
+    sb->addr = addr;
+    sb->len = len;
+    sb->dirty = false;
+
+    // Initialize "writer head" position
+    sb->writer_ptr = (char*)addr;
+    sb->writer_len_remaining = len;
+}
+
 void sb_dispose_mmap_(struct sharkybuf *sb) {
     /*
-     * Dispose of buffer we allocated previously
+     * Dispose of buffer we allocated previously with mmap(2)
      *
      * Asserts:
      *      sb is not NULL
@@ -106,10 +149,40 @@ void sb_dispose_mmap_(struct sharkybuf *sb) {
     sb->writer_len_remaining = 0;
 }
 
+void sb_dispose_posix_memalign_(struct sharkybuf *sb) {
+    /*
+     * Dispose of buffer we allocated previously with posix_memalign(3)
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->addr is not NULL
+     *      sb->strategy is SHARKYBUF_STRATEGY_POSIX_MEMALIGN
+     */
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->addr != NULL);
+    assert(sb->strategy == SHARKYBUF_STRATEGY_POSIX_MEMALIGN);
+
+    // Actually free the page(s)
+    free(sb->addr);
+
+    // Clear struct
+    sb->strategy = SHARKYBUF_STRATEGY_UNALLOCATED;
+    sb->addr = NULL;
+    sb->len = 0;
+    sb->dirty = false;
+    sb->writer_ptr = NULL;
+    sb->writer_len_remaining = 0;
+}
+
 void sb_dispose(struct sharkybuf *sb) {
     switch (sb->strategy) {
         case SHARKYBUF_STRATEGY_MMAP:
             sb_dispose_mmap_(sb);
+            break;
+        case SHARKYBUF_STRATEGY_POSIX_MEMALIGN:
+            sb_dispose_posix_memalign_(sb);
             break;
         default:
             fprintf(stderr, "[sb_dispose] invalid strategy %d.\n", sb->strategy);
@@ -357,33 +430,25 @@ void hamming(int max_ed, char *name, int fd) {
 }
 
 void catlines(int fd) {
-    char       *buf;
-    char       *buf_writeptr;
-    char       *buf_readptr;
-    size_t      buf_len;
-    size_t      buf_len_remaining;
-    size_t      buf_len_remaining_read;
-    size_t      page_size;
-    size_t      chars_read;
+    struct sharkybuf    sbuf;
+    char               *buf_writeptr;
+    char               *buf_readptr;
+    size_t              buf_len;
+    size_t              buf_len_remaining;
+    size_t              buf_len_remaining_read;
+    size_t              page_size;
+    size_t              chars_read;
 
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
-    int pma_rv = posix_memalign((void**)&buf, page_size, buf_len);
-    buf_writeptr = buf;
-    buf_readptr = buf;
-    buf_len_remaining = buf_len;
-    buf_len_remaining_read = buf_len;
+    sb_create_posix_memalign(&sbuf, buf_len);
 
-    // posix_memalign(3) states "The value of errno is indeterminate after a call to posix_memalign()",
-    // so we mustn't use perror().
-    if (pma_rv) {
-        fprintf(stderr, "[catlines] posix_memalign failed, returned %d.\n", pma_rv);
-        abort();
-    }
-
-    // Zero buffer
-    memset(buf_writeptr, 0, buf_len_remaining);
+    // Initialize buffer read and write head positions
+    buf_writeptr = sbuf.addr;
+    buf_readptr = sbuf.addr;
+    buf_len_remaining = sbuf.len;
+    buf_len_remaining_read = sbuf.len;
 
     for ( ; ; ) {
         ssize_t rd_rv = read(fd, buf_writeptr, buf_len_remaining);
@@ -439,17 +504,17 @@ void catlines(int fd) {
         if (rd_rv == 0) break;
 
         // Clear and go around
-        buf_writeptr = buf;
-        buf_readptr = buf;
-        buf_len_remaining = buf_len;
-        buf_len_remaining_read = buf_len;
+        buf_writeptr = sbuf.addr;
+        buf_readptr = sbuf.addr;
+        buf_len_remaining = sbuf.len;
+        buf_len_remaining_read = sbuf.len;
 
         // Zero buffer
         memset(buf_writeptr, 0, buf_len_remaining);
     }
 
     // Clean up
-    if (buf) free(buf);
+    sb_dispose(&sbuf);
 }
 
 int main(int argc, char *argv[]) {
