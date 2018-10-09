@@ -34,10 +34,15 @@
 #define SHARKYBUF_STRATEGY_POSIX_MEMALIGN   2
 
 struct sharkybuf {
+    /* buffer information */
     int         strategy;
     void       *addr;
     size_t      len;
     bool        dirty;
+
+    /* position of writer head */
+    char       *writer_ptr;
+    size_t      writer_len_remaining;
 };
 
 void sb_create_mmap(struct sharkybuf *sb, size_t len) {
@@ -48,28 +53,32 @@ void sb_create_mmap(struct sharkybuf *sb, size_t len) {
      *      sb is not null
      *      len is an exact multiple of system page size
      */
-    void       *mm_rv;
+    void       *addr;
 
     // Pre-flight checks
     assert(sb != NULL);
     assert((len % (size_t)sysconf(_SC_PAGESIZE)) == 0);
 
     // Perform mmap
-    mm_rv = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    addr = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-    if (mm_rv == MAP_FAILED) {
+    if (addr == MAP_FAILED) {
         perror("[sb_create_mmap] mmap");
         exit(4);
     }
 
     // Zero buffer
-    memset(mm_rv, 0, len);
+    memset(addr, 0, len);
 
     // Populate struct
     sb->strategy = SHARKYBUF_STRATEGY_MMAP;
-    sb->addr = mm_rv;
+    sb->addr = addr;
     sb->len = len;
     sb->dirty = false;
+
+    // Initialize "writer head" position
+    sb->writer_ptr = (char*)addr;
+    sb->writer_len_remaining = len;
 }
 
 void sb_dispose_mmap_(struct sharkybuf *sb) {
@@ -93,6 +102,8 @@ void sb_dispose_mmap_(struct sharkybuf *sb) {
     sb->addr = NULL;
     sb->len = 0;
     sb->dirty = false;
+    sb->writer_ptr = NULL;
+    sb->writer_len_remaining = 0;
 }
 
 void sb_dispose(struct sharkybuf *sb) {
@@ -106,10 +117,56 @@ void sb_dispose(struct sharkybuf *sb) {
     }
 }
 
+int sb_append_line_or_zeroes(struct sharkybuf *sb, char *line) {
+    /*
+     * Append value of line followed by '\n' to buffer if there is
+     * enough room. On detecting that snprintf has truncated the text
+     * to append, zero out the remainder of the buffer.
+     *
+     * Returns:
+     *      0 on success
+     *      1 if remaining buffer was insufficient, and was zeroed
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->addr is not NULL
+     *      line is not NULL
+     */
+    int snp_rv;
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->addr != NULL);
+    assert(line != NULL);
+
+    // Append string + newline to buffer
+    //
+    // Return value snp_rv is length of text that *ought* to have been written,
+    // NOT INCLUDING the '\0' byte.
+    snp_rv = snprintf(sb->writer_ptr, (sb->writer_len_remaining / sizeof(char)), "%s\n", line);
+    sb->dirty = true;
+
+    if (snp_rv < 0) {
+        perror("[sb_append_line_or_zeroes] snprintf");
+        exit(4);
+    }
+
+    if ((size_t)(snp_rv * sizeof(char)) >= sb->writer_len_remaining) {
+        memset(sb->writer_ptr, 0, sb->writer_len_remaining);
+        return 1;
+    } else {
+        // Deliberately update pointer to point at location of '\0',
+        // as we'll overwrite that with a new null-terminated string
+        sb->writer_len_remaining -= (size_t)(snp_rv * sizeof(char));
+        sb->writer_ptr += snp_rv;
+        return 0;
+    }
+
+}
+
 void hamming(int max_ed, char *name, int fd) {
     struct sharkybuf    sbuf;
     char               *buf;
-    char               *buf_writeptr;
     char               *buf_readptr;
     size_t              buf_len;
     size_t              buf_len_remaining;
@@ -135,7 +192,6 @@ void hamming(int max_ed, char *name, int fd) {
 
     buf = (char*)sbuf.addr;
 
-    buf_writeptr = buf;
     buf_readptr = buf;
     buf_len_remaining = buf_len;
     buf_len_remaining_read = buf_len;
@@ -195,30 +251,20 @@ void hamming(int max_ed, char *name, int fd) {
                     // No, emit candidate
                     for ( ; ; ) {
                         // Append candidate word + newline to buffer
-                        int snp_rv = snprintf(buf_writeptr, buf_len_remaining, "%s\n", name_temp);
-                        sbuf.dirty = true;
-
-                        // Check for error
-                        if (snp_rv < 0) {
-                            perror("[hamming] snprintf");
-                            exit(4);
-                        }
+                        int append_rv = sb_append_line_or_zeroes(&sbuf, name_temp);
 
                         // If truncation has occurred, i.e. only part of the candidate word
-                        // was able to be written to the buffer, then:
+                        // was able to be written to the buffer and was subsequently
+                        // zeroed, then:
                         //
-                        // 1. Zero out the partial write in the buffer
-                        // 2. Write the buffer out to fd, retrying until the entire buffer
+                        // 1. Write the buffer out to fd, retrying until the entire buffer
                         //    has been written out
-                        // 3. Clear (zero) the buffer
-                        // 4. Reset pointers and counters
-                        // 5. Go around the loop again in order to retry appending the
+                        // 2. Clear (zero) the buffer
+                        // 3. Reset pointers and counters
+                        // 4. Go around the loop again in order to retry appending the
                         //    candidate word to the buffer
 
-                        if ((size_t)(snp_rv * sizeof(char)) >= buf_len_remaining) {
-                            // Fill remainder of buffer with null bytes
-                            memset(buf_writeptr, 0, buf_len_remaining);
-
+                        if (append_rv != 0) {
                             // Give away page(s) to pipe using vmsplice
                             struct iovec iov = {
                                 .iov_base   = buf_readptr,
@@ -252,7 +298,6 @@ void hamming(int max_ed, char *name, int fd) {
 
                             buf = (char*)sbuf.addr;
 
-                            buf_writeptr = buf;
                             buf_readptr = buf;
                             buf_len_remaining = buf_len;
                             buf_len_remaining_read = buf_len;
@@ -261,10 +306,6 @@ void hamming(int max_ed, char *name, int fd) {
                             continue;
 
                         } else {
-                            // Deliberately update pointer to point at location of '\0'
-                            buf_len_remaining -= (size_t)(snp_rv * sizeof(char));
-                            buf_writeptr += snp_rv;
-
                             // Candidate word was written OK, no need to retry, break out of loop
                             break;
                         }
@@ -297,9 +338,6 @@ void hamming(int max_ed, char *name, int fd) {
 
     // Write partially-full page to pipe before freeing it
     if (sbuf.dirty) {
-        // Fill remainder of buffer with null bytes
-        memset(buf_writeptr, 0, buf_len_remaining);
-
         // Give away page(s) to pipe using vmsplice
         struct iovec iov = {
             .iov_base   = buf_readptr,
