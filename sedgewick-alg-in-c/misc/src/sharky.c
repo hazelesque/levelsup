@@ -190,6 +190,30 @@ void sb_dispose(struct sharkybuf *sb) {
     }
 }
 
+void sb_wipe(struct sharkybuf *sb) {
+    /*
+     * Wipe buffer, reset "writer head" position and clear dirty flag
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->addr is not NULL
+     */
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->addr != NULL);
+
+    // Zero buffer
+    memset(sb->addr, 0, sb->len);
+
+    // Initialize "writer head" position
+    sb->writer_ptr = (char*)(sb->addr);
+    sb->writer_len_remaining = sb->len;
+
+    // Reset dirty flag
+    sb->dirty = false;
+}
+
 int sb_append_line_or_zeroes(struct sharkybuf *sb, char *line) {
     /*
      * Append value of line followed by '\n' to buffer if there is
@@ -235,6 +259,54 @@ int sb_append_line_or_zeroes(struct sharkybuf *sb, char *line) {
         return 0;
     }
 
+}
+
+int sb_recvbuf_read(struct sharkybuf *sb, int fd) {
+    /*
+     * Read from pipe fd until either buffer is full or EOF is reached
+     *
+     * Returns:
+     *      0 if we filled our buffer without reaching EOF
+     *      1 if we reached EOF
+     *
+     * Asserts:
+     *      sb is not NULL
+     *      sb->addr is not NULL
+     */
+
+    ssize_t         rd_rv;
+
+    // Pre-flight checks
+    assert(sb != NULL);
+    assert(sb->addr != NULL);
+
+    // Read
+    while (true) {
+        rd_rv = read(fd, sb->writer_ptr, sb->writer_len_remaining);
+
+        // Check if we actually managed to read anything,
+        // and handle retries and errors
+        if (rd_rv < 0) {
+            switch (errno) {
+                case EINTR:
+                case EAGAIN:
+                    // Try again
+                    continue;
+                default:
+                    perror("[sb_recvbuf_read] read");
+                    exit(4);
+            }
+        } else {
+            sb->writer_ptr += (rd_rv / sizeof(char));
+            sb->writer_len_remaining -= ((rd_rv / sizeof(char))  * sizeof(char));
+        }
+
+        // Check if we've reached EOF
+        if(rd_rv == 0) return 1;
+
+        // Check if we're out of buffer
+        if(!(sb->writer_len_remaining > 0)) return 0;
+    }
 }
 
 void sb_sendbuf_vmsplice(struct sharkybuf *sb, int fd) {
@@ -431,45 +503,22 @@ void hamming(int max_ed, char *name, int fd) {
 
 void catlines(int fd) {
     struct sharkybuf    sbuf;
-    char               *buf_writeptr;
     char               *buf_readptr;
     size_t              buf_len;
-    size_t              buf_len_remaining;
     size_t              buf_len_remaining_read;
     size_t              page_size;
-    size_t              chars_read;
 
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     buf_len = page_size;
     sb_create_posix_memalign(&sbuf, buf_len);
 
-    // Initialize buffer read and write head positions
-    buf_writeptr = sbuf.addr;
+    // Initialize buffer "reader head" position
     buf_readptr = sbuf.addr;
-    buf_len_remaining = sbuf.len;
     buf_len_remaining_read = sbuf.len;
 
     for ( ; ; ) {
-        ssize_t rd_rv = read(fd, buf_writeptr, buf_len_remaining);
-
-        if (rd_rv < 0) {
-            switch (errno) {
-                case EINTR:
-                case EAGAIN:
-                    // Try again
-                    continue;
-                default:
-                    perror("[catlines] read");
-                    exit(4);
-            }
-        } else {
-            buf_writeptr += (rd_rv / sizeof(char));
-            buf_len_remaining -= ((rd_rv / sizeof(char))  * sizeof(char));
-        }
-
-        // If there's free buffer left, and we've not reached EOF, keep reading
-        if(buf_len_remaining && (rd_rv != 0)) continue;
+        int read_rv = sb_recvbuf_read(&sbuf, fd);
 
         // Adjust buf_len_remaining_read so that we don't write nulls to the terminal
         for ( ; buf_len_remaining_read >= sizeof(char); ) {
@@ -501,16 +550,12 @@ void catlines(int fd) {
         }
 
         // Did we reach EOF?
-        if (rd_rv == 0) break;
+        if (read_rv == 1) break;
 
-        // Clear and go around
-        buf_writeptr = sbuf.addr;
+        // Clear buffer, reset "reader head" position, and go around
+        sb_wipe(&sbuf);
         buf_readptr = sbuf.addr;
-        buf_len_remaining = sbuf.len;
         buf_len_remaining_read = sbuf.len;
-
-        // Zero buffer
-        memset(buf_writeptr, 0, buf_len_remaining);
     }
 
     // Clean up
