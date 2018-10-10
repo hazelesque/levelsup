@@ -31,7 +31,7 @@
  ***************************************************************
  */
 
-// Usage: $0 <max edit distance> <name> [dictionary file]
+// Usage: $0 <max hamming distance> <name> [dictionary file]
 
 
 #define SHARKYBUF_STRATEGY_UNALLOCATED      0
@@ -562,7 +562,7 @@ void hamming(int max_ed, char *name, int fd) {
 
     name_len = strlen(name);
 
-    fprintf(stderr, "Max edit distance: %d, Name: \"%s\" (Length: %d)\n", max_ed, name, name_len);
+    fprintf(stderr, "Max hamming distance: %d, Name: \"%s\" (Length: %d)\n", max_ed, name, name_len);
 
     // Allocate a buffer, page-aligned, one page in size
     page_size = (size_t)sysconf(_SC_PAGESIZE);
