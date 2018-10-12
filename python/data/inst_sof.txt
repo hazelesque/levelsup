@@ -1,0 +1,34 @@
+i Society of Friends
+u jane
+u dave
+u michelle
+u mike
+u sarah
+u james
+u iain
+u alice
+u robert
+u annette
+u tracy
+u alan
+u stephen
+u gemma
+fr jane dave
+fr jane sarah
+fr dave michelle
+fr dave mike
+fr michelle mike
+fr sarah james
+fr james mike
+fr tracy robert
+fr tracy alan
+fr tracy stephen
+fr robert alice
+fr robert annette
+fr alice annette
+fr alan stephen
+fr alan gemma
+fr stephen gemma
+dq jane mike
+dq alice stephen
+dq robert james
