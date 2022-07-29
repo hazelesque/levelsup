@@ -9,3 +9,6 @@ src/%.o : src/%.c $(DEPS)
 
 bin/sharky : src/sharky.o src/sharkybuf.o
 	$(CC) -o $@ src/sharky.o src/sharkybuf.o $(CFLAGS)
+
+asm/%.s : src/%.c
+	$(CC) -c -g -Wa,-ahlsdn=$@ $< $(CFLAGS)
